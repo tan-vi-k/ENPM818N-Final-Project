@@ -1,0 +1,69 @@
+name: kube deployment
+
+on:
+  workflow_call:
+
+jobs:
+  kubernetes-deployment-apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Connect to EKS cluster
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name otel-demo-cluster --region us-east-1
+
+      - name: Deploy Application
+        run: |
+          kubectl apply -f ./kubernetes/opentelemetry-demo.yaml
+
+      - name: Verify Pods
+        run: |
+          echo "Waiting for all pods to be ready in the otel-demo namespace..."
+          kubectl wait --for=condition=Ready pods --all --namespace otel-demo --timeout=300s
+          echo "All pods are ready."
+
+  kubernetes-failure-rollout:
+    needs: kubernetes-deployment-apply
+    runs-on: ubuntu-latest
+    if: failure()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Connect to EKS cluster
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name otel-demo-cluster --region us-east-1
+
+      - name: Rollback deployments
+        run: |
+          echo "Rolling back deployments in namespace otel-demo..."
+          kubectl get deployments -n otel-demo -o jsonpath="{.items[*].metadata.name}" | tr ' ' '\n' | while read deployment; do
+            echo "Rolling back $deployment..."
+            kubectl rollout undo deployment/$deployment -n otel-demo || echo "No rollback available for $deployment."
+            kubectl rollout status deployment/$deployment -n otel-demo --timeout=60s
+          done
+
+      - name: Verify Pods
+        run: |
+          echo "Verifying all pods in namespace otel-demo are ready..."
+          kubectl wait --for=condition=Ready pods --all --namespace otel-demo --timeout=300s
+          echo "All pods are ready after rollback."
+
+      - name: Log rollback success
+        run: echo "Rollback completed and verified for all deployments in the namespace."
